@@ -45,6 +45,9 @@ STRATEGY_LABELS = {
 DOCUMENTS = {
     "law.pdf":                 "저작권법",
     "labor_standards_act.pdf": "근로기준법",
+    "constitution.pdf": "대한민국헌법",
+    "copyright_enforcement_decree.pdf": "저작권법 시행령",
+    "information_network_act.pdf": "정보통신망 이용촉진 및 정보보호 등에 관한 법률",
 }
 LENGTH_DOCUMENT = "labor_standards_act.pdf"
 

@@ -51,7 +51,7 @@ streamlit run app.py     # 브라우저 채팅 화면
 ## 파일 구조
 
 ```
-data/laws/      원본 법령 PDF (law.pdf, labor_standards_act.pdf; 시행예정조문 제외한 현행본)
+data/laws/      원본 법령 PDF 5개 (시행예정조문 제외한 현행본)
 data/index/     Chroma DB (build_index.py 생성, git 추적 안 함)
 data/cache/     임베딩 캐시 (build_index.py 생성, git 추적 안 함)
 common.py       양쪽이 공유하는 설정 + 임베딩 모델 로더 (GPU/CPU 자동 전환)
@@ -78,6 +78,8 @@ PDF → pdf_to_pages() → clean_text() (머리말·쪽번호 제거) → 청킹
 ### 다중 문서 (추가과제)
 
 `article` 전략은 `common.DOCUMENTS`에 등록된 PDF마다 따로 청킹(장/절 상태가 문서 간에 섞이지 않게)한 뒤 `doc` 메타데이터를 붙여 같은 컬렉션에 합쳐 저장한다. 조문 번호가 문서 간에 겹칠 수 있어서(예: 두 법 모두 "제10조" 있음) 근거 인용에 항상 법률명을 포함시키도록 `rag.py`의 인용 파싱·검증 로직 전체가 문서명까지 함께 매칭한다.
+
+현재 등록된 법령은 저작권법, 근로기준법, [대한민국헌법](https://www.law.go.kr/LSW/lsInfoP.do?lsiSeq=61603) (1988-02-25 시행), [저작권법 시행령](https://www.law.go.kr/LSW/lsInfoP.do?lsiSeq=288567) (2026-08-11 시행), [정보통신망 이용촉진 및 정보보호 등에 관한 법률](https://www.law.go.kr/LSW/lsInfoP.do?lsiSeq=283843) (2026-09-11 시행)이다. 마지막 세 PDF는 국가법령정보센터 현행본에서 추가했다. 2026-09-23 빌드 결과 `article`은 각각 519, 300, 290, 282, 478개로 총 1,869개, 비교용 `length`는 근로기준법 117개다. 새 세 법령의 제1조를 법령명으로 직접 조회하고 해당 근거 인용을 검증했다. 이어 실제 OpenAI API로 새 법령 제1조 질문 3개와 저작권법·시행령 제1조 비교 질문을 실행했다. 앱 기본값인 `부칙 제외`를 적용한 답변은 원문과 맞고 인용 경고도 없었다. 터미널에서 이 필터를 빼면 저작권법 본문·부칙 제1조가 함께 검색돼 `근거 범위 불명확` 경고가 발생한다.
 
 ### 검색 (`RagBot.search`)
 
