@@ -1,9 +1,20 @@
 """build_index.py 와 rag.py 가 함께 쓰는 설정과 임베딩 함수"""
 import os
+import sys
 import numpy as np
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# conda activate 없이 python.exe를 직접 실행하면 Library/bin(cuDNN 등 CUDA
+# 의존 DLL이 있는 곳)이 PATH에 없어서 torch가 GPU를 잡고도 cuDNN 심볼을 못
+# 찾아 죽는다. cuDNN의 하위 DLL들은 os.add_dll_directory가 아니라 실제
+# PATH 환경변수를 보고 서로를 찾으므로, PATH 자체에 직접 넣어줘야 한다.
+if sys.platform == "win32":
+    _lib_bin = os.path.join(sys.prefix, "Library", "bin")
+    if os.path.isdir(_lib_bin) and _lib_bin not in os.environ.get("PATH", ""):
+        os.environ["PATH"] = _lib_bin + os.pathsep + os.environ.get("PATH", "")
+        os.add_dll_directory(_lib_bin)
 
 # 경로는 이 파일 위치 기준 → 어느 폴더에서 실행해도 같은 곳을 가리킴
 BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
