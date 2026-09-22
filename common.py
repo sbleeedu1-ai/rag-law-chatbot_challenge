@@ -31,7 +31,7 @@ STRATEGY_LABELS = {
     "length":  "글자수 단위 (슬라이딩 윈도우)",
 }
 
-# 문서 파일명 -> (화면에 보여줄 이름, PDF 안에서 반복되는 머리말 문자열)
+# 문서 파일명 -> 화면/근거 인용에 쓸 표시 이름
 DOCUMENTS = {
     "law.pdf":                 "저작권법",
     "labor_standards_act.pdf": "근로기준법",

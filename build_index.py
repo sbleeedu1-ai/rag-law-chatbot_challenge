@@ -56,36 +56,30 @@ def is_heading(line: str) -> bool:
                 or SECTION.match(line) or SUBSEC.match(line))
 
 
-def parse_heading(m) -> tuple[str, str]:
-    """매칭된 장/절/관 제목을 (깨끗한 이름, 태그) 로 분리"""
-    raw  = f"{m.group(1)} {m.group(2)}".strip()
-    tag  = TAG.search(raw)
-    name = TAG.sub("", raw).strip()
-    return name, (tag.group().strip() if tag else "")
+def parse_heading(m) -> str:
+    """매칭된 장/절/관 제목에서 <개정 ...> 같은 태그를 떼어낸 이름만 반환"""
+    raw = f"{m.group(1)} {m.group(2)}".strip()
+    return TAG.sub("", raw).strip()
 
 
-def scan_heading(lines, chapter, chapter_note, section, section_note, subsec, subsec_note):
+def scan_heading(lines, chapter, section, subsec):
     """장/절/관/부칙 제목을 만나면 갱신. 상위 단위가 바뀌면 하위는 초기화."""
     for line in lines:
-        m = BUCHIK.match(line)
-        if m:
-            chapter, chapter_note = "부칙", m.group(1).strip()
-            section = section_note = subsec = subsec_note = ""
+        if BUCHIK.match(line):
+            chapter, section, subsec = "부칙", "", ""
             continue
         m = CHAPTER.match(line)
         if m:
-            chapter, chapter_note = parse_heading(m)
-            section = section_note = subsec = subsec_note = ""
+            chapter, section, subsec = parse_heading(m), "", ""
             continue
         m = SECTION.match(line)
         if m:
-            section, section_note = parse_heading(m)
-            subsec = subsec_note = ""
+            section, subsec = parse_heading(m), ""
             continue
         m = SUBSEC.match(line)
         if m:
-            subsec, subsec_note = parse_heading(m)
-    return chapter, chapter_note, section, section_note, subsec, subsec_note
+            subsec = parse_heading(m)
+    return chapter, section, subsec
 
 
 def split_items(title: str, text: str, max_len: int = 500) -> list[str]:
@@ -122,7 +116,7 @@ def split_paragraphs(title: str, body: str, max_len: int = 500) -> list[str]:
 
 def chunk_by_article(text: str) -> list[dict]:
     pieces = ARTICLE.split(text)
-    state = scan_heading(pieces[0].splitlines(), "", "", "", "", "", "")
+    state = scan_heading(pieces[0].splitlines(), "", "", "")
 
     chunks, seen = [], set()
     for k in range(1, len(pieces), 2):
@@ -134,14 +128,12 @@ def chunk_by_article(text: str) -> list[dict]:
             continue
         seen.add(body)
 
-        chapter, chapter_note, section, section_note, subsec, subsec_note = state
+        chapter, section, subsec = state
         for c in split_paragraphs(title, body):
             chunks.append({
                 "text": c, "article": title,
                 "article_no": ARTICLE_NO.match(title).group(),   # "제39조(보호기간의 원칙)" / "제35조 삭제" → "제39조" / "제35조"
-                "chapter": chapter, "chapter_note": chapter_note,
-                "section": section, "section_note": section_note,
-                "subsec": subsec, "subsec_note": subsec_note,
+                "chapter": chapter, "section": section, "subsec": subsec,
             })
 
         state = scan_heading(rest.splitlines(), *state)
@@ -156,7 +148,7 @@ def chunk_by_length(text: str, chunk_size: int = 400, overlap: int = 50) -> list
     끊기거나 여러 조문이 한 청크에 섞일 수 있다. (구조 기반 청킹과 비교용)
     메타데이터(장/절/관/조문)는 그 청크가 시작하는 지점 기준으로 채운다."""
     lines = text.splitlines()
-    chapter = chapter_note = section = section_note = subsec = subsec_note = ""
+    chapter = section = subsec = ""
     cur_article, cur_article_no = "", ""
 
     chunks: list[dict] = []
@@ -169,9 +161,7 @@ def chunk_by_length(text: str, chunk_size: int = 400, overlap: int = 50) -> list
         if chunk_text:
             chunks.append({
                 "text": chunk_text, "article": cur_article, "article_no": cur_article_no,
-                "chapter": chapter, "chapter_note": chapter_note,
-                "section": section, "section_note": section_note,
-                "subsec": subsec, "subsec_note": subsec_note,
+                "chapter": chapter, "section": section, "subsec": subsec,
             })
         if carry_overlap and overlap > 0 and chunk_text:
             tail = chunk_text[-overlap:]
@@ -185,8 +175,7 @@ def chunk_by_length(text: str, chunk_size: int = 400, overlap: int = 50) -> list
             cur_article = m.group(1).strip()
             cur_article_no = ARTICLE_NO.match(cur_article).group()
         if is_heading(line):
-            chapter, chapter_note, section, section_note, subsec, subsec_note = scan_heading(
-                [line], chapter, chapter_note, section, section_note, subsec, subsec_note)
+            chapter, section, subsec = scan_heading([line], chapter, section, subsec)
             continue   # 제목 줄 자체는 청크 본문에 넣지 않음 (구조 기반 청킹과 동일 처리)
 
         buf.append(line)
