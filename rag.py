@@ -6,7 +6,7 @@ import os, re, time
 import chromadb
 from openai import OpenAI
 
-from common import DB_DIR, STRATEGIES, DOCUMENTS, load_embedder, embed_texts
+from common import active_db_dir, STRATEGIES, DOCUMENTS, LENGTH_DOCUMENT, load_embedder, embed_texts
 
 LLM_MODEL = "gpt-4o-mini"
 
@@ -72,6 +72,20 @@ REWRITE_PROMPT = """당신은 검색어 재작성기입니다. 질문에 답하�
 
 # 질문 속 조문 번호: "제39조", "39조", "제104조의2", "104조 의 2" 모두 허용
 ART_NO = re.compile(r"제?\s*(\d+)\s*조(?:\s*의\s*(\d+))?")
+DOC_IN_QUERY = re.compile("|".join(re.escape(name) for name in sorted(DOCUMENTS.values(), key=len, reverse=True)))
+
+
+def article_requests(query: str) -> list[tuple[str | None, str]]:
+    docs = list(DOC_IN_QUERY.finditer(query))
+    current_doc, doc_index = None, 0
+    requests = []
+    for m in ART_NO.finditer(query):
+        while doc_index < len(docs) and docs[doc_index].end() <= m.start():
+            current_doc = docs[doc_index].group()
+            doc_index += 1
+        number, sub = m.groups()
+        requests.append((current_doc, f"제{number}조" + (f"의{sub}" if sub else "")))
+    return requests
 
 
 class Memory:
@@ -99,11 +113,11 @@ class Memory:
 
 
 CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
-_DOC_NAMES = "|".join(re.escape(name) for name in DOCUMENTS.values())
+_DOC_NAMES = "|".join(re.escape(name) for name in sorted(DOCUMENTS.values(), key=len, reverse=True))
 CITE_TOKEN = re.compile(
-    rf"(?:({_DOC_NAMES})\s*)?(제\d+조(?:의\d+)?)?\s*(?:제(\d+)항)?\s*(?:제(\d+)호)?"
+    rf"(?:({_DOC_NAMES})\s*)?(제\d+조(?:의\d+)?)?\s*(?:제(\d+)항)?\s*(?:제(?:(\d+(?:의\d+)?)호|(\d+)호의(\d+)))?"
 )
-HO_NO = re.compile(r"^\s*(\d+)(?:의\d+)?\.\s", re.M)   # 청크 본문에서 "6. ..." 같은 호 번호 추출용
+HO_NO = re.compile(r"^\s*(\d+(?:의\d+)?)\.\s", re.M)
 
 
 def parse_citations(answer: str) -> list[tuple[str | None, str, str | None, str | None]]:
@@ -112,21 +126,32 @@ def parse_citations(answer: str) -> list[tuple[str | None, str, str | None, str 
     lines = [l.split(":", 1)[1] for l in answer.splitlines() if l.strip().startswith("근거:")]
     out = []
     for line in lines:
-        line = re.sub(r"\([^)]*\)", "", line)                   # (손해배상의 청구) 같은 제목 제거
+        line = re.sub(r"\([^)]*\)", "", line).replace("*", "")
         for i, ch in enumerate(CIRCLED, 1):
-            line = line.replace(ch, f" 제{i}항,")                  # ① → 제1항
+            line = line.replace(ch, f" 제{i}항")
         last_doc, last_art, last_para = None, None, None
-        for token in re.split(r"[,·]|및", line):
-            m = CITE_TOKEN.search(token.strip())
-            if not m or not (m.group(1) or m.group(2) or m.group(3) or m.group(4)):
+        for token in re.split(rf"[,·]|\s+및\s+(?=(?:{_DOC_NAMES})|제\d+(?:조|항|호))", line):
+            token = token.strip()
+            if not token:
+                continue
+            m = CITE_TOKEN.fullmatch(token)
+            if not m:
+                unknown = re.fullmatch(r"(.+?)\s+(제\d+조(?:의\d+)?)(?:\s*제(\d+)항)?(?:\s*제(?:(\d+(?:의\d+)?)호|(\d+)호의(\d+)))?", token)
+                if unknown:
+                    ho = unknown.group(4) or (f"{unknown.group(5)}의{unknown.group(6)}" if unknown.group(5) else None)
+                    out.append((*unknown.group(1, 2, 3), ho))
+                else:
+                    out.append((None, f"인용 형식 미확인: {token}", None, None))
                 continue
             doc = m.group(1) or last_doc                          # 법률명 생략 시 직전 것 재사용
             art = m.group(2) or last_art                          # "제2항"만 있으면 앞 조문에 붙임
             if not art:
+                out.append((None, f"인용 형식 미확인: {token}", None, None))
                 continue
             para = m.group(3) or (last_para if not m.group(2) else None)  # "제8호"만 있으면 앞 항에 붙임
             last_doc, last_art, last_para = doc, art, para
-            out.append((doc, art, para, m.group(4)))
+            ho = m.group(4) or (f"{m.group(5)}의{m.group(6)}" if m.group(5) else None)
+            out.append((doc, art, para, ho))
     return out
 
 
@@ -136,8 +161,8 @@ def cited_articles(answer: str, hits: list[dict]) -> list[str]:
     for doc, art, _, _ in parse_citations(answer):
         for h in hits:
             m = h["meta"]
-            if m["article_no"] == art and (doc is None or m["doc"] == doc):
-                title = f"{m['doc']} {m['article']}"
+            if art in m.get("article_nos", [m["article_no"]]) and (doc is None or m["doc"] == doc):
+                title = f"{m['doc']} {m['article'] if m['article_no'] == art else art}"
                 if title not in titles:
                     titles.append(title)
                 break
@@ -158,29 +183,41 @@ class RagBot:
         self.llm = OpenAI(api_key=key)
         self.embedder = load_embedder()
 
-        client = chromadb.PersistentClient(path=DB_DIR)
+        client = chromadb.PersistentClient(path=active_db_dir())
         try:
             self.collection = client.get_collection(STRATEGIES[strategy])   # 열기만, 지우지 않음
+            self.citation_collection = client.get_collection(STRATEGIES["article"])
         except Exception as e:
             raise RuntimeError("컬렉션이 없습니다. 먼저 python build_index.py 를 실행하세요") from e
 
     def lookup(self, query: str, where: dict | None = None) -> list[dict]:
         """질문에 조문 번호가 있으면 메타데이터 article_no 로 그 조문의 청크를 직접 가져옴"""
         found = []
-        for num, sub in ART_NO.findall(query):
-            key = f"제{num}조" + (f"의{sub}" if sub else "")
-            cond = {"article_no": key}
+        for doc, key in article_requests(query):
+            cond = {"$or": [{"article_no": key}, {"article_nos": {"$contains": key}}]}
+            if doc:
+                cond = {"$and": [cond, {"doc": doc}]}
             if where:
                 cond = {"$and": [cond, where]}               # 부칙 제외 등 기존 필터와 함께
             got = self.collection.get(where=cond, include=["documents", "metadatas"])
             rows = sorted(zip(got["ids"], got["documents"], got["metadatas"]),
                           key=lambda r: int(r[0].split("_")[1]))   # ①②③ 순서 유지
             found += [{"id": i, "text": t, "meta": m, "similarity": None} for i, t, m in rows]
-        return found
+        return list({h["id"]: h for h in found}.values())
 
     def search(self, query: str, top_k: int = 5, where: dict | None = None) -> list[dict]:
         """번호 직접 조회 결과를 앞에, 나머지를 벡터 검색으로 채움 (유사도 = 1 - distance)"""
+        if getattr(self, "strategy", "article") == "length":
+            if any(doc != DOCUMENTS[LENGTH_DOCUMENT] for doc in DOC_IN_QUERY.findall(query)):
+                return []
+        filters = where.get("$and", [where]) if where else []
+        allowed = next((part["doc"]["$in"] for part in filters
+                        if "doc" in part and isinstance(part["doc"], dict) and "$in" in part["doc"]), None)
+        if allowed is not None and any(doc not in allowed for doc, _ in article_requests(query) if doc):
+            return []
         direct = self.lookup(query, where)
+        if direct and all(doc is None for doc, _ in article_requests(query)):
+            direct = direct[:top_k]
         q_emb = embed_texts(self.embedder, [query])[0].tolist()
         res = self.collection.query(query_embeddings=[q_emb], n_results=top_k, where=where)
         vector = [
@@ -198,8 +235,10 @@ class RagBot:
         갇히지 않게 DB에서 해당 조문 전체를 직접 조회해 확인한다 — 조문이 여러 청크로
         나뉘어 있을 때 그중 일부만 검색에 뽑혀서 생기는 오탐을 막는다.
         호는 그 조문 전체 기준으로 존재 여부만 확인한다 (어느 항 소속인지까지는 안 따짐)."""
-        hit_keys = {(h["meta"]["doc"], h["meta"]["article_no"]) for h in hits}
-        detail_cache: dict[tuple[str, str], tuple[set, set]] = {}   # key -> (항 번호 집합, 호 번호 집합)
+        hit_keys = {(m["doc"], art, m.get("supplement", ""))
+                    for h in hits for m in [h["meta"]]
+                    for art in m.get("article_nos", [m["article_no"]]) if art}
+        detail_cache: dict[tuple[str, str, str], tuple[set, set]] = {}   # key -> (항 번호 집합, 호 번호 집합)
 
         bad = []
         for doc, art, para, ho in parse_citations(answer):
@@ -209,8 +248,8 @@ class RagBot:
             if ho:
                 label += f" 제{ho}호"
             candidates = [k for k in hit_keys if k[1] == art and (doc is None or k[0] == doc)]
-            if doc is None and len(candidates) > 1:
-                bad.append(label + " (법률명 불명확)")
+            if len(candidates) > 1:
+                bad.append(label + " (근거 범위 불명확)")
                 continue
             if not candidates:
                 bad.append(label)
@@ -220,15 +259,16 @@ class RagBot:
 
             key = candidates[0]
             if key not in detail_cache:
-                cond = {"$and": [{"doc": key[0]}, {"article_no": key[1]}]}
-                got = self.collection.get(where=cond, include=["documents"])
+                cond = {"$and": [{"doc": key[0]}, {"article_no": key[1]},
+                                 {"supplement": key[2]}]}
+                got = getattr(self, "citation_collection", self.collection).get(where=cond, include=["documents"])
                 paras, hos = set(), set()
                 for text in got["documents"]:
                     paras.update(CIRCLED.index(ch) + 1 for ch in text if ch in CIRCLED)
-                    hos.update(int(n) for n in HO_NO.findall(text))
+                    hos.update(HO_NO.findall(text))
                 detail_cache[key] = (paras, hos)
             paras, hos = detail_cache[key]
-            if (para and int(para) not in paras) or (ho and int(ho) not in hos):
+            if (para and int(para) not in paras) or (ho and ho not in hos):
                 bad.append(label)
         return list(dict.fromkeys(bad))                               # 중복 제거, 순서 유지
 

@@ -22,6 +22,15 @@ LAW_DIR    = os.path.join(BASE_DIR, "data", "laws")
 CACHE_DIR  = os.path.join(BASE_DIR, "data", "cache")
 DB_DIR     = os.path.join(BASE_DIR, "data", "index")
 
+
+def active_db_dir() -> str:
+    active = os.path.join(DB_DIR, "active.txt")
+    if not os.path.exists(active):
+        return DB_DIR
+    with open(active, encoding="utf-8") as f:
+        build_id = f.read().strip()
+    return os.path.join(DB_DIR, "builds", build_id)
+
 # 청킹 전략별 컬렉션 이름 + 화면에 보여줄 이름
 STRATEGIES = {
     "article": "rules_article",
@@ -37,6 +46,7 @@ DOCUMENTS = {
     "law.pdf":                 "저작권법",
     "labor_standards_act.pdf": "근로기준법",
 }
+LENGTH_DOCUMENT = "labor_standards_act.pdf"
 
 MODEL_NAME  = "BAAI/bge-m3"
 MAX_SEQ_LEN = 1024

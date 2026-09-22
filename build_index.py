@@ -1,12 +1,12 @@
 """PDF → 정제 → 청킹 → 임베딩 → Chroma 저장
 문서나 청킹 규칙이 바뀔 때만 실행:  python build_index.py
 """
-import os, re, time, hashlib
+import os, re, time, hashlib, uuid
 import numpy as np
 import pymupdf
 import chromadb
 
-from common import (LAW_DIR, CACHE_DIR, DB_DIR, STRATEGIES, DOCUMENTS, MODEL_NAME,
+from common import (LAW_DIR, CACHE_DIR, DB_DIR, STRATEGIES, DOCUMENTS, LENGTH_DOCUMENT, MODEL_NAME,
                     load_embedder, embed_texts)
 
 
@@ -40,7 +40,7 @@ def clean_text(raw: str, law_name: str = "저작권법") -> str:
 
 
 # ── 3. 청킹 ─────────────────────────────────────────────
-ARTICLE = re.compile(r"^(제\d+조(?:의\d+)?\s*(?:\([^)]*\)|삭제))", re.M)
+ARTICLE = re.compile(r"^(제\d+조(?:의\d+)?(?:\s*\([^)]*\)|\s*삭제)?)(?=\s|$)", re.M)
 ARTICLE_NO = re.compile(r"^제\d+조(?:의\d+)?")   # 조문 제목에서 순수 조 번호만 뽑을 때 사용
 CHAPTER = re.compile(r"^\s*(제\s*\d+\s*장(?:의\s*\d+)?)\s*(.*)$")
 SECTION = re.compile(r"^\s*(제\s*\d+\s*절(?:의\s*\d+)?)\s*(.*)$")
@@ -120,29 +120,50 @@ def split_paragraphs(title: str, body: str, max_len: int = 500) -> list[str]:
 
 
 def chunk_by_article(text: str) -> list[dict]:
-    pieces = ARTICLE.split(text)
-    state = scan_heading(pieces[0].splitlines(), "", "", "")
-
     chunks, seen = [], set()
-    for k in range(1, len(pieces), 2):
-        title, rest = pieces[k].strip(), pieces[k + 1]
-        body_lines = [l for l in rest.splitlines() if not is_heading(l)]
-        body = (title + "\n".join(body_lines)).strip()
+    state = ("", "", "")
+    supplement = ""
+    title, body_lines, article_state = None, [], state
 
-        if body in seen:
+    def flush():
+        nonlocal title, body_lines
+        if not title and not body_lines:
+            return
+        body = "\n".join(([title] if title else []) + body_lines).strip()
+        key = (article_state[0], supplement, body)
+        if body and key not in seen:
+            seen.add(key)
+            for part in split_paragraphs(title or "부칙", body):
+                chunks.append({
+                    "text": part, "article": title or "부칙",
+                    "article_no": ARTICLE_NO.match(title).group() if title else "",
+                    "chapter": article_state[0], "section": article_state[1],
+                    "subsec": article_state[2], "supplement": supplement,
+                })
+        title, body_lines = None, []
+
+    for line in text.splitlines():
+        if BUCHIK.match(line):
+            flush()
+            state = ("부칙", "", "")
+            supplement = line.strip()
+            article_state = state
             continue
-        seen.add(body)
-
-        chapter, section, subsec = state
-        for c in split_paragraphs(title, body):
-            chunks.append({
-                "text": c, "article": title,
-                "article_no": ARTICLE_NO.match(title).group(),   # "제39조(보호기간의 원칙)" / "제35조 삭제" → "제39조" / "제35조"
-                "chapter": chapter, "section": section, "subsec": subsec,
-            })
-
-        state = scan_heading(rest.splitlines(), *state)
-
+        m = ARTICLE.match(line)
+        if m:
+            flush()
+            title = m.group(1).strip()
+            body_lines = [line[m.end():].strip()]
+            article_state = state
+            continue
+        if is_heading(line):
+            flush()
+            state = scan_heading([line], *state)
+            article_state = state
+            continue
+        if title or state[0] == "부칙":
+            body_lines.append(line)
+    flush()
     return chunks
 
 
@@ -155,33 +176,56 @@ def chunk_by_length(text: str, chunk_size: int = 400, overlap: int = 50) -> list
     lines = text.splitlines()
     chapter = section = subsec = ""
     cur_article, cur_article_no = "", ""
+    supplement = ""
 
     chunks: list[dict] = []
     buf: list[str] = []
     buf_len = 0
+    buf_meta = None
+    buf_articles: list[str] = []
 
     def flush(carry_overlap: bool):
-        nonlocal buf, buf_len
+        nonlocal buf, buf_len, buf_meta, buf_articles
         chunk_text = "\n".join(buf).strip()
         if chunk_text:
-            chunks.append({
-                "text": chunk_text, "article": cur_article, "article_no": cur_article_no,
-                "chapter": chapter, "section": section, "subsec": subsec,
-            })
+            chunk = {"text": chunk_text, **buf_meta}
+            if buf_articles:
+                chunk["article_nos"] = buf_articles.copy()
+            chunks.append(chunk)
         if carry_overlap and overlap > 0 and chunk_text:
             tail = chunk_text[-overlap:]
             buf, buf_len = [tail], len(tail)
+            buf_meta = {
+                "article": cur_article, "article_no": cur_article_no,
+                "chapter": chapter, "section": section, "subsec": subsec,
+                "supplement": supplement,
+            }
+            buf_articles = [cur_article_no] if cur_article_no else []
         else:
             buf, buf_len = [], 0
+            buf_meta, buf_articles = None, []
 
     for line in lines:
+        if is_heading(line):
+            flush(carry_overlap=False)
+            chapter, section, subsec = scan_heading([line], chapter, section, subsec)
+            if BUCHIK.match(line):
+                supplement = line.strip()
+                cur_article, cur_article_no = "", ""
+            continue   # 제목 줄 자체는 청크 본문에 넣지 않음 (구조 기반 청킹과 동일 처리)
+
         m = ARTICLE.match(line)
         if m:
             cur_article = m.group(1).strip()
             cur_article_no = ARTICLE_NO.match(cur_article).group()
-        if is_heading(line):
-            chapter, section, subsec = scan_heading([line], chapter, section, subsec)
-            continue   # 제목 줄 자체는 청크 본문에 넣지 않음 (구조 기반 청킹과 동일 처리)
+        if buf_meta is None:
+            buf_meta = {
+                "article": cur_article, "article_no": cur_article_no,
+                "chapter": chapter, "section": section, "subsec": subsec,
+                "supplement": supplement,
+            }
+        if cur_article_no and cur_article_no not in buf_articles:
+            buf_articles.append(cur_article_no)
 
         buf.append(line)
         buf_len += len(line) + 1
@@ -210,40 +254,36 @@ def embed_cached(embedder, name: str, texts: list[str]) -> np.ndarray:
 
 
 # ── 5. Chroma 저장 ───────────────────────────────────────
-def save_to_chroma(chunks: list[dict], texts: list[str], vecs: np.ndarray, collection: str):
-    assert len(texts) == len(vecs) == len(chunks)
-    client = chromadb.PersistentClient(path=DB_DIR)
-    try:
-        client.delete_collection(collection)     # 있으면 지우고, 없으면 넘어감
-    except Exception:
-        pass
-
-    col = client.create_collection(collection, metadata={"hnsw:space": "cosine"})
-    col.add(
-        ids=[f"chunk_{i}" for i in range(len(chunks))],
-        documents=texts,
-        embeddings=vecs.tolist(),
-        metadatas=[{k: v for k, v in c.items() if k != "text"} for c in chunks],
-    )
-    print(f"[{collection}] 저장된 청크:", col.count())
+def save_to_chroma(col, chunks: list[dict], vecs: np.ndarray, batch_size: int):
+    assert len(vecs) == len(chunks)
+    start = col.count()
+    for offset in range(0, len(chunks), batch_size):
+        batch = chunks[offset:offset + batch_size]
+        col.add(
+            ids=[f"chunk_{start + offset + i}" for i in range(len(batch))],
+            documents=[c["text"] for c in batch],
+            embeddings=vecs[offset:offset + batch_size].tolist(),
+            metadatas=[{k: v for k, v in c.items() if k != "text"} for c in batch],
+        )
 
 
-def build_strategy(strategy: str, chunk_fn, docs: list[tuple[str, str]], embedder):
+def build_strategy(strategy: str, chunk_fn, docs: list[tuple[str, str]], embedder, client):
     """docs: [(문서 표시명, 정제된 본문), ...]. 문서마다 따로 청킹(장/절 상태가 섞이지 않게)
     한 뒤 doc 필드를 붙여 하나로 합치고, 한 컬렉션에 함께 저장한다."""
-    chunks = []
+    col = client.create_collection(STRATEGIES[strategy], metadata={"hnsw:space": "cosine"})
+    batch_size = min(1000, client.get_max_batch_size())
     for doc_label, clean in docs:
         doc_chunks = chunk_fn(clean)
         for c in doc_chunks:
             c["doc"] = doc_label
-        chunks.extend(doc_chunks)
-
-    texts = [c["text"] for c in chunks]
-    lens = [len(t) for t in texts]
-    print(f"[{strategy}] 청크 {len(chunks)}개 / 평균 {np.mean(lens):.0f}자 / 최대 {max(lens)}자")
-
-    vecs = embed_cached(embedder, f"records_{strategy}", texts)
-    save_to_chroma(chunks, texts, vecs, STRATEGIES[strategy])
+        if not doc_chunks:
+            raise ValueError(f"[{doc_label}] {strategy} 청크가 없습니다")
+        texts = [c["text"] for c in doc_chunks]
+        cache_name = f"records_{strategy}_{hashlib.md5(doc_label.encode()).hexdigest()[:10]}"
+        vecs = embed_cached(embedder, cache_name, texts)
+        save_to_chroma(col, doc_chunks, vecs, batch_size)
+        print(f"[{strategy}] {doc_label}: 청크 {len(doc_chunks)}개 / 누적 {col.count()}개")
+    return col.count()
 
 
 def main():
@@ -256,8 +296,24 @@ def main():
         docs.append((label, clean))
 
     embedder = load_embedder()
-    build_strategy("article", chunk_by_article, docs, embedder)
-    build_strategy("length", chunk_by_length, docs, embedder)
+    build_id = uuid.uuid4().hex
+    build_dir = os.path.join(DB_DIR, "builds", build_id)
+    client = chromadb.PersistentClient(path=build_dir)
+    counts = {
+        "article": build_strategy("article", chunk_by_article, docs, embedder, client),
+        "length": build_strategy("length", chunk_by_length,
+                                 [doc for doc in docs if doc[0] == DOCUMENTS[LENGTH_DOCUMENT]],
+                                 embedder, client),
+    }
+    if not all(counts.values()):
+        raise RuntimeError("빈 컬렉션이 있어 인덱스를 전환하지 않았습니다")
+
+    active = os.path.join(DB_DIR, "active.txt")
+    pending = active + ".tmp"
+    with open(pending, "w", encoding="utf-8") as f:
+        f.write(build_id)
+    os.replace(pending, active)
+    print(f"[인덱스 전환] {build_id}: {counts}")
 
 
 if __name__ == "__main__":

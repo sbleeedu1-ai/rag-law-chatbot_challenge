@@ -5,11 +5,9 @@
 import re
 import streamlit as st
 from rag import RagBot, Memory
-from common import STRATEGIES, STRATEGY_LABELS, DOCUMENTS
+from common import STRATEGIES, STRATEGY_LABELS, DOCUMENTS, LENGTH_DOCUMENT
 
 st.set_page_config(page_title="법률 챗봇", page_icon="⚖️")
-
-DOC_LABELS = list(DOCUMENTS.values())
 
 # PDF 추출은 화면에 보이는 한 줄 단위로 끊겨서, 문장 중간에 줄바꿈이 섞여 있다.
 # 청킹 로직(원본 텍스트)은 그대로 두고, 화면에 보여줄 때만 문장이 끝나지 않은
@@ -61,6 +59,7 @@ except Exception as e:
     st.stop()
 
 st.sidebar.caption(f"청크 {bot.collection.count()}개 (전략: {STRATEGY_LABELS[strategy]})")
+DOC_LABELS = list(DOCUMENTS.values()) if strategy == "article" else [DOCUMENTS[LENGTH_DOCUMENT]]
 
 # 사용자(브라우저 탭)마다 따로 유지되는 것들
 if "messages" not in st.session_state:
