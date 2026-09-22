@@ -1,8 +1,10 @@
 streamlit==1.64.0
-openai==3.15.0
+openai==3.17.0
 python-dotenv==1.2.3
 pymupdf==1.28.2
-numpy==1.26.4
-torch==2.14.0
-sentence-transformers==6.0.1
+numpy==2.5.3
+# GPU(CUDA) 없는 PC는 이 줄 그대로 두면 CPU 빌드가 설치됨.
+# GPU를 쓰려면 이 줄을 지우고 conda로 따로 설치: conda install -c conda-forge pytorch-gpu
+torch==2.13.0
+sentence-transformers==6.1.0
 chromadb==1.5.9
