@@ -47,12 +47,13 @@ streamlit run app.py     # 브라우저 채팅 화면
 ## 파일 구조
 
 ```
-law.pdf, labor_standards_act.pdf   원본 법령 PDF (law.go.kr, 시행예정조문 제외한 현행본)
+data/laws/      원본 법령 PDF (law.pdf, labor_standards_act.pdf; 시행예정조문 제외한 현행본)
+data/index/     Chroma DB (build_index.py 생성, git 추적 안 함)
+data/cache/     임베딩 캐시 (build_index.py 생성, git 추적 안 함)
 common.py       양쪽이 공유하는 설정 + 임베딩 모델 로더 (GPU/CPU 자동 전환)
 build_index.py  PDF → 정제 → 청킹(2가지 전략) → 임베딩 → Chroma 저장
 rag.py          검색 + 답변 생성 (RagBot, Memory). 멀티턴, 근거 인용 검증 포함
 app.py          Streamlit 화면. 문서/청킹 전략 선택, 근거 조항 표시
-my_chroma_db/, rag_rules_cache/    build_index.py가 생성하는 산출물 (git 추적 안 함)
 back_up/        이전 iteration 버전들 (참고용으로 남겨둠, 실행 안 됨)
 ```
 
@@ -67,7 +68,7 @@ PDF → pdf_to_pages() → clean_text() (머리말·쪽번호 제거) → 청킹
 - **article** (`chunk_by_article`): 조 → 항(①②③) → 호(1. 2. 3.) 순으로 법령 구조를 따라 분할. 조문 경계를 넘지 않음.
 - **length** (`chunk_by_length`): 조·항 구조를 무시하고 글자수(기본 400자, 50자 오버랩)로 슬라이딩 윈도우 분할. `article` 대비 검색·근거 검증 정확도가 낮아지는 걸 실제로 확인할 수 있음 (아래 "알려진 한계" 참고).
 
-두 전략 모두 같은 Chroma DB(`my_chroma_db/`) 안에 별도 컬렉션(`rules_article`, `rules_length`)으로 저장되며, `app.py` 사이드바에서 전환 가능.
+두 전략 모두 같은 Chroma DB(`data/index/`) 안에 별도 컬렉션(`rules_article`, `rules_length`)으로 저장되며, `app.py` 사이드바에서 전환 가능.
 
 ### 다중 문서 (추가과제)
 
@@ -109,7 +110,7 @@ Windows에서 `conda activate` 없이 `python.exe`를 직접 실행하면 cuDNN 
 
 ### 지금 구조가 이미 감당할 수 있는 부분
 
-`common.DOCUMENTS`(파일명→표시명 매핑), 청크의 `doc` 메타데이터, 근거 인용에 법률명 포함, `app.py`의 문서 선택 멀티셀렉트 — 이 전체 설계가 "문서 2개"를 가정하고 만든 게 아니라 **N개 문서를 이미 지원하도록 일반화**되어 있음. `DOCUMENTS`에 항목만 추가하고 `build_index.py`를 다시 돌리면 원칙적으로 더 늘어난 문서도 바로 들어감.
+`common.DOCUMENTS`(파일명→표시명 매핑), 청크의 `doc` 메타데이터, 근거 인용에 법률명 포함, `app.py`의 문서 선택 멀티셀렉트 — 이 전체 설계가 "문서 2개"를 가정하고 만든 게 아니라 **N개 문서를 이미 지원하도록 일반화**되어 있음. 새 PDF를 `data/laws/`에 넣고 `DOCUMENTS`에 항목을 추가한 뒤 `build_index.py`를 다시 돌리면 원칙적으로 더 늘어난 문서도 바로 들어감.
 
 ### 스케일 키울 때 실제로 손볼 만한 지점 (제안, 필수 아님)
 

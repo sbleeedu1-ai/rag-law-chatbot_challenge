@@ -1,4 +1,4 @@
 *.env
-my_chroma_db/
-rag_rules_cache/
+data/index/
+data/cache/
 __pycache__/

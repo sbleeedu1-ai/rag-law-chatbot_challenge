@@ -18,8 +18,9 @@ if sys.platform == "win32":
 
 # 경로는 이 파일 위치 기준 → 어느 폴더에서 실행해도 같은 곳을 가리킴
 BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
-CACHE_DIR  = os.path.join(BASE_DIR, "rag_rules_cache")
-DB_DIR     = os.path.join(BASE_DIR, "my_chroma_db")
+LAW_DIR    = os.path.join(BASE_DIR, "data", "laws")
+CACHE_DIR  = os.path.join(BASE_DIR, "data", "cache")
+DB_DIR     = os.path.join(BASE_DIR, "data", "index")
 
 # 청킹 전략별 컬렉션 이름 + 화면에 보여줄 이름
 STRATEGIES = {

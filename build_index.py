@@ -6,7 +6,7 @@ import numpy as np
 import pymupdf
 import chromadb
 
-from common import (BASE_DIR, CACHE_DIR, DB_DIR, STRATEGIES, DOCUMENTS, MODEL_NAME,
+from common import (LAW_DIR, CACHE_DIR, DB_DIR, STRATEGIES, DOCUMENTS, MODEL_NAME,
                     load_embedder, embed_texts)
 
 
@@ -249,7 +249,7 @@ def build_strategy(strategy: str, chunk_fn, docs: list[tuple[str, str]], embedde
 def main():
     docs = []
     for filename, label in DOCUMENTS.items():
-        path = os.path.join(BASE_DIR, filename)
+        path = os.path.join(LAW_DIR, filename)
         raw = "\n".join(pdf_to_pages(path))
         clean = clean_text(raw, law_name=label)
         print(f"[{label}] 원문 {len(raw):,}자 → 정제 후 {len(clean):,}자")

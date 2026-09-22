@@ -10,7 +10,7 @@ python build_index.py          # 문서/청킹 규칙 바뀔 때만
 streamlit run app.py           # 또는: python rag.py (터미널)
 ```
 
-`.env`에 `OPENAI_API_KEY` 필요 (`.env.example` 참고). `my_chroma_db/`, `rag_rules_cache/`는 `build_index.py`가 만드는 산출물이라 git에 없음 — 코드만 보고 "빌드가 안 됐다"고 오해하지 말 것.
+`.env`에 `OPENAI_API_KEY` 필요 (`.env.example` 참고). `data/index/`, `data/cache/`는 `build_index.py`가 만드는 산출물이라 git에 없음 — 코드만 보고 "빌드가 안 됐다"고 오해하지 말 것. 원본 PDF는 `data/laws/`에 둔다.
 
 ## 코드 스타일
 
