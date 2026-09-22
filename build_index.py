@@ -6,7 +6,7 @@ import numpy as np
 import pymupdf
 import chromadb
 
-from common import (PDF_PATH, CACHE_DIR, DB_DIR, STRATEGIES, MODEL_NAME,
+from common import (BASE_DIR, CACHE_DIR, DB_DIR, STRATEGIES, DOCUMENTS, MODEL_NAME,
                     load_embedder, embed_texts)
 
 
@@ -40,7 +40,8 @@ def clean_text(raw: str, law_name: str = "저작권법") -> str:
 
 
 # ── 3. 청킹 ─────────────────────────────────────────────
-ARTICLE = re.compile(r"^(제\d+조(?:의\d+)?\s*\([^)]*\))", re.M)
+ARTICLE = re.compile(r"^(제\d+조(?:의\d+)?\s*(?:\([^)]*\)|삭제))", re.M)
+ARTICLE_NO = re.compile(r"^제\d+조(?:의\d+)?")   # 조문 제목에서 순수 조 번호만 뽑을 때 사용
 CHAPTER = re.compile(r"^\s*(제\s*\d+\s*장(?:의\s*\d+)?)\s*(.*)$")
 SECTION = re.compile(r"^\s*(제\s*\d+\s*절(?:의\s*\d+)?)\s*(.*)$")
 SUBSEC  = re.compile(r"^\s*(제\s*\d+\s*관(?:의\s*\d+)?)\s*(.*)$")
@@ -137,7 +138,7 @@ def chunk_by_article(text: str) -> list[dict]:
         for c in split_paragraphs(title, body):
             chunks.append({
                 "text": c, "article": title,
-                "article_no": title.split("(")[0],      # "제39조(보호기간의 원칙)" → "제39조"
+                "article_no": ARTICLE_NO.match(title).group(),   # "제39조(보호기간의 원칙)" / "제35조 삭제" → "제39조" / "제35조"
                 "chapter": chapter, "chapter_note": chapter_note,
                 "section": section, "section_note": section_note,
                 "subsec": subsec, "subsec_note": subsec_note,
@@ -182,7 +183,7 @@ def chunk_by_length(text: str, chunk_size: int = 400, overlap: int = 50) -> list
         m = ARTICLE.match(line)
         if m:
             cur_article = m.group(1).strip()
-            cur_article_no = cur_article.split("(")[0]
+            cur_article_no = ARTICLE_NO.match(cur_article).group()
         if is_heading(line):
             chapter, chapter_note, section, section_note, subsec, subsec_note = scan_heading(
                 [line], chapter, chapter_note, section, section_note, subsec, subsec_note)
@@ -233,8 +234,16 @@ def save_to_chroma(chunks: list[dict], texts: list[str], vecs: np.ndarray, colle
     print(f"[{collection}] 저장된 청크:", col.count())
 
 
-def build_strategy(strategy: str, chunk_fn, clean: str, embedder):
-    chunks = chunk_fn(clean)
+def build_strategy(strategy: str, chunk_fn, docs: list[tuple[str, str]], embedder):
+    """docs: [(문서 표시명, 정제된 본문), ...]. 문서마다 따로 청킹(장/절 상태가 섞이지 않게)
+    한 뒤 doc 필드를 붙여 하나로 합치고, 한 컬렉션에 함께 저장한다."""
+    chunks = []
+    for doc_label, clean in docs:
+        doc_chunks = chunk_fn(clean)
+        for c in doc_chunks:
+            c["doc"] = doc_label
+        chunks.extend(doc_chunks)
+
     texts = [c["text"] for c in chunks]
     lens = [len(t) for t in texts]
     print(f"[{strategy}] 청크 {len(chunks)}개 / 평균 {np.mean(lens):.0f}자 / 최대 {max(lens)}자")
@@ -244,13 +253,17 @@ def build_strategy(strategy: str, chunk_fn, clean: str, embedder):
 
 
 def main():
-    raw = "\n".join(pdf_to_pages(PDF_PATH))
-    clean = clean_text(raw)
-    print(f"원문 {len(raw):,}자 → 정제 후 {len(clean):,}자")
+    docs = []
+    for filename, label in DOCUMENTS.items():
+        path = os.path.join(BASE_DIR, filename)
+        raw = "\n".join(pdf_to_pages(path))
+        clean = clean_text(raw, law_name=label)
+        print(f"[{label}] 원문 {len(raw):,}자 → 정제 후 {len(clean):,}자")
+        docs.append((label, clean))
 
     embedder = load_embedder()
-    build_strategy("article", chunk_by_article, clean, embedder)
-    build_strategy("length", chunk_by_length, clean, embedder)
+    build_strategy("article", chunk_by_article, docs, embedder)
+    build_strategy("length", chunk_by_length, docs, embedder)
 
 
 if __name__ == "__main__":

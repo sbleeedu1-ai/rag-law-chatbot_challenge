@@ -18,7 +18,6 @@ if sys.platform == "win32":
 
 # 경로는 이 파일 위치 기준 → 어느 폴더에서 실행해도 같은 곳을 가리킴
 BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
-PDF_PATH   = os.path.join(BASE_DIR, "law.pdf")
 CACHE_DIR  = os.path.join(BASE_DIR, "rag_rules_cache")
 DB_DIR     = os.path.join(BASE_DIR, "my_chroma_db")
 
@@ -30,6 +29,12 @@ STRATEGIES = {
 STRATEGY_LABELS = {
     "article": "조·항 단위 (구조 기반)",
     "length":  "글자수 단위 (슬라이딩 윈도우)",
+}
+
+# 문서 파일명 -> (화면에 보여줄 이름, PDF 안에서 반복되는 머리말 문자열)
+DOCUMENTS = {
+    "law.pdf":                 "저작권법",
+    "labor_standards_act.pdf": "근로기준법",
 }
 
 MODEL_NAME  = "BAAI/bge-m3"

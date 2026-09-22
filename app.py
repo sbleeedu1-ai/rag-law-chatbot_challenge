@@ -2,11 +2,25 @@
 실행:  streamlit run app.py
 (먼저 python build_index.py 로 DB가 만들어져 있어야 함)
 """
+import re
 import streamlit as st
 from rag import RagBot, Memory
-from common import STRATEGIES, STRATEGY_LABELS
+from common import STRATEGIES, STRATEGY_LABELS, DOCUMENTS
 
-st.set_page_config(page_title="저작권법 챗봇", page_icon="⚖️")
+st.set_page_config(page_title="법률 챗봇", page_icon="⚖️")
+
+DOC_LABELS = list(DOCUMENTS.values())
+
+# PDF 추출은 화면에 보이는 한 줄 단위로 끊겨서, 문장 중간에 줄바꿈이 섞여 있다.
+# 청킹 로직(원본 텍스트)은 그대로 두고, 화면에 보여줄 때만 문장이 끝나지 않은
+# 줄바꿈을 공백으로 이어붙인다. 문장이 실제로 끝났거나(. > 」 』 】 ) 로 종료),
+# 다음 줄이 새 항목(①②③, "1. ", "<개정 ...>")으로 시작하면 줄바꿈을 그대로 둔다.
+_SOFT_BREAK = re.compile(r"(?<![.>」』】)])\n(?!\s*(?:[①-⑳]|\d+(?:의\d+)?\.\s|<))")
+
+
+def _display_text(text: str) -> str:
+    """근거 조항 원문을 화면에 보여줄 때만 다듬는다 (임베딩/청킹에는 영향 없음)."""
+    return _SOFT_BREAK.sub(" ", text)
 
 
 # Streamlit 은 입력이 있을 때마다 이 파일을 처음부터 다시 실행한다.
@@ -21,15 +35,15 @@ def render_sources(hits: list[dict]):
     with st.expander(f"근거 조항 {len(hits)}개 보기"):
         for h in hits:
             m = h["meta"]
-            loc = " / ".join(x for x in (m["chapter"], m["section"], m["subsec"]) if x)
+            loc = " / ".join(x for x in (m["doc"], m["chapter"], m["section"], m["subsec"]) if x)
             score = "번호로 직접 조회" if h["similarity"] is None else f"유사도 {h['similarity']:.2f}"
             st.markdown(f"**{m['article']}**  ({score})")
             st.caption(loc)
-            st.text(h["text"])
+            st.text(_display_text(h["text"]))
 
 
-st.title("저작권법 질의응답")
-st.caption("저작권법 원문에서 관련 조항을 찾아, 그 조항만 근거로 답합니다. 이어서 질문해도 앞 대화를 기억합니다.")
+st.title("법률 질의응답")
+st.caption("선택한 법률 원문에서 관련 조항을 찾아, 그 조항만 근거로 답합니다. 이어서 질문해도 앞 대화를 기억합니다.")
 
 with st.sidebar:
     st.subheader("청킹 전략")
@@ -65,6 +79,7 @@ if st.session_state.last_strategy != strategy:
 
 with st.sidebar:
     st.subheader("검색 설정")
+    selected_docs = st.multiselect("검색할 법률", options=DOC_LABELS, default=DOC_LABELS)
     top_k = st.slider("참고할 조항 수", min_value=3, max_value=10, value=5)
     exclude_buchik = st.checkbox("부칙 제외", value=True)
     if st.button("대화 지우기"):
@@ -97,7 +112,15 @@ if question := st.chat_input("예: 저작권은 사후 얼마나 유지되나요
         st.markdown(question)
 
     with st.chat_message("assistant"):
-        where = {"chapter": {"$ne": "부칙"}} if exclude_buchik else None
+        conds = []
+        if exclude_buchik:
+            conds.append({"chapter": {"$ne": "부칙"}})
+        if selected_docs and len(selected_docs) < len(DOC_LABELS):
+            conds.append({"doc": {"$in": selected_docs}})
+        where = conds[0] if len(conds) == 1 else ({"$and": conds} if conds else None)
+        if not selected_docs:
+            st.warning("검색할 법률을 하나 이상 선택해주세요.")
+            st.stop()
         try:
             with st.spinner("질문을 해석하고 조항을 찾는 중..."):
                 result = bot.ask(question, memory=st.session_state.memory,

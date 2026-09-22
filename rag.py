@@ -6,11 +6,11 @@ import os, re, time
 import chromadb
 from openai import OpenAI
 
-from common import DB_DIR, STRATEGIES, load_embedder, embed_texts
+from common import DB_DIR, STRATEGIES, DOCUMENTS, load_embedder, embed_texts
 
 LLM_MODEL = "gpt-4o-mini"
 
-SYSTEM_PROMPT = """당신은 저작권법 안내 챗봇입니다.
+SYSTEM_PROMPT = """당신은 법률 안내 챗봇입니다. [근거]에는 서로 다른 법률의 조문이 함께 담길 수 있습니다.
 - 반드시 아래 [근거] 내용만 근거로 답하세요.
 - 이전 대화는 질문의 의도를 파악하는 데만 쓰고, 사실 근거는 이번 [근거]에서만 가져오세요.
 - 이전에 무엇을 물었는지 되짚어 설명하지 말고, 조문 내용으로 바로 답하세요.
@@ -19,11 +19,11 @@ SYSTEM_PROMPT = """당신은 저작권법 안내 챗봇입니다.
 - 근거에 없는 내용이면 '문서에서 확인되지 않습니다.'라고만 답하세요.
 - <개정 ...>, <신설 ...> 같은 개정 이력 표기는 답변에 옮기지 마세요. 단, 개정·신설 시기를 묻는 질문에는 이를 근거로 답하세요.
 - 조문이 직접 규정하지 않은 법적 결론(두 제도를 동시에 적용받는지, 무엇이 우선인지 등)은 단정하지 마세요. 관련 조문 내용을 각각 제시한 뒤 '그 관계는 조문에 직접 규정되어 있지 않습니다.'라고 밝히세요.
-- 근거 줄에는 [근거]에 실제로 있는 조항과 항만 적으세요. 제125조와 제125조의2처럼 번호가 비슷해도 서로 다른 조문이니 구분하세요.
-- 답변 본문 다음 줄에, 근거를 반드시 한 줄로 아래 형식 그대로 적으세요. 조문 제목, 괄호, ①② 같은 기호는 쓰지 말고 '제N조 제M항' 형태로만 적으세요.
-  근거: 제39조 제1항
-  근거: 제48조 제1항, 제2항
-  근거: 제10조, 제16조 제1항"""
+- 근거 줄에는 [근거]에 실제로 있는 조항과 항만 적으세요. 제125조와 제125조의2처럼 번호가 비슷해도 서로 다른 조문이니 구분하고, 서로 다른 법률에 같은 번호의 조문이 있으면 반드시 법률명으로 구분하세요.
+- 답변 본문 다음 줄에, 근거를 반드시 한 줄로 아래 형식 그대로 적으세요. 각 조문 앞에 [근거]에 표시된 법률명을 반드시 붙이고, 조문 제목·괄호·①② 같은 기호는 쓰지 말고 '법률명 제N조 제M항' 형태로만 적으세요.
+  근거: 저작권법 제39조 제1항
+  근거: 근로기준법 제48조 제1항, 제2항
+  근거: 저작권법 제10조, 근로기준법 제16조"""
 
 # 이전 대화를 가리키는 단서: 지시어, 순서 표현, 비교 표현, "공동저작물은요?" 같은 생략형 끝맺음
 REF_CUE = re.compile(r"그|이거|저거|아까|방금|처음|먼저|앞에|위에|둘|차이|달라|다른가|비교|관계|예외|또|"
@@ -99,57 +99,67 @@ class Memory:
 
 
 CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
-CITE_TOKEN = re.compile(r"(제\d+조(?:의\d+)?)?\s*(?:제(\d+)항)?")
+_DOC_NAMES = "|".join(re.escape(name) for name in DOCUMENTS.values())
+CITE_TOKEN = re.compile(rf"(?:({_DOC_NAMES})\s*)?(제\d+조(?:의\d+)?)?\s*(?:제(\d+)항)?")
 
 
-def parse_citations(answer: str) -> list[tuple[str, str | None]]:
-    """답변의 모든 '근거:' 줄을 읽어 [(조문번호, 항번호 또는 None), ...] 로 반환.
-    형식이 흔들려도(여러 줄, 제목 괄호, ①② 기호) 최대한 읽어낸다."""
+def parse_citations(answer: str) -> list[tuple[str | None, str, str | None]]:
+    """답변의 모든 '근거:' 줄을 읽어 [(법률명 또는 None, 조문번호, 항번호 또는 None), ...] 로 반환.
+    형식이 흔들려도(여러 줄, 제목 괄호, ①② 기호, 법률명 생략) 최대한 읽어낸다."""
     lines = [l.split(":", 1)[1] for l in answer.splitlines() if l.strip().startswith("근거:")]
     out = []
     for line in lines:
         line = re.sub(r"\([^)]*\)", "", line)                   # (손해배상의 청구) 같은 제목 제거
         for i, ch in enumerate(CIRCLED, 1):
             line = line.replace(ch, f" 제{i}항,")                  # ① → 제1항
-        last_art = None
+        last_doc, last_art = None, None
         for token in re.split(r"[,·]|및", line):
             m = CITE_TOKEN.search(token.strip())
-            if not m or not (m.group(1) or m.group(2)):
+            if not m or not (m.group(1) or m.group(2) or m.group(3)):
                 continue
-            art = m.group(1) or last_art                          # "제2항"만 있으면 앞 조문에 붙임
+            doc = m.group(1) or last_doc                          # 법률명 생략 시 직전 것 재사용
+            art = m.group(2) or last_art                          # "제2항"만 있으면 앞 조문에 붙임
             if not art:
                 continue
-            last_art = art
-            out.append((art, m.group(2)))
+            last_doc, last_art = doc, art
+            out.append((doc, art, m.group(3)))
     return out
 
 
 def verify_citations(answer: str, hits: list[dict]) -> list[str]:
-    """인용한 조·항이 검색된 청크에 실제로 있는지 대조. 없는 인용 목록을 반환."""
-    have: dict[str, set] = {}
+    """인용한 법률·조·항이 검색된 청크에 실제로 있는지 대조. 없는(또는 문서가 불명확한) 인용 목록을 반환."""
+    have: dict[tuple[str, str], set] = {}
     for h in hits:
-        art = h["meta"]["article_no"]
+        m = h["meta"]
+        key = (m["doc"], m["article_no"])
         paras = {CIRCLED.index(ch) + 1 for ch in h["text"] if ch in CIRCLED}
-        have.setdefault(art, set()).update(paras or {None})       # 항 기호 없는 청크 = 조문 전체
+        have.setdefault(key, set()).update(paras or {None})       # 항 기호 없는 청크 = 조문 전체
 
     bad = []
-    for art, para in parse_citations(answer):
-        label = f"{art} 제{para}항" if para else art
-        if art not in have:
+    for doc, art, para in parse_citations(answer):
+        label = f"{doc + ' ' if doc else ''}{art}" + (f" 제{para}항" if para else "")
+        candidates = [k for k in have if k[1] == art and (doc is None or k[0] == doc)]
+        if doc is None and len(candidates) > 1:
+            bad.append(label + " (법률명 불명확)")
+            continue
+        if not candidates:
             bad.append(label)
-        elif para and int(para) not in have[art] and None not in have[art]:
+            continue
+        if para and int(para) not in have[candidates[0]] and None not in have[candidates[0]]:
             bad.append(label)
     return list(dict.fromkeys(bad))                               # 중복 제거, 순서 유지
 
 
 def cited_articles(answer: str, hits: list[dict]) -> list[str]:
-    """인용된 조문 번호를 검색된 청크의 정확한 조문 제목으로 변환 (기억 저장용)"""
+    """인용된 법률·조문을 검색된 청크의 정확한 표시명으로 변환 (기억 저장용)"""
     titles = []
-    for art, _ in parse_citations(answer):
+    for doc, art, _ in parse_citations(answer):
         for h in hits:
-            title = h["meta"]["article"]
-            if title.startswith(art + "(") and title not in titles:
-                titles.append(title)
+            m = h["meta"]
+            if m["article_no"] == art and (doc is None or m["doc"] == doc):
+                title = f"{m['doc']} {m['article']}"
+                if title not in titles:
+                    titles.append(title)
                 break
     return titles
 
@@ -207,7 +217,7 @@ class RagBot:
         blocks = []
         for i, h in enumerate(hits, 1):
             m = h["meta"]
-            loc = " / ".join(x for x in (m["chapter"], m["section"], m["subsec"]) if x)
+            loc = " / ".join(x for x in (m["doc"], m["chapter"], m["section"], m["subsec"]) if x)
             blocks.append(f"[{i}] ({loc})\n{h['text']}")
         return "\n\n".join(blocks)
 
