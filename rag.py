@@ -100,36 +100,40 @@ class Memory:
 
 CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
 _DOC_NAMES = "|".join(re.escape(name) for name in DOCUMENTS.values())
-CITE_TOKEN = re.compile(rf"(?:({_DOC_NAMES})\s*)?(제\d+조(?:의\d+)?)?\s*(?:제(\d+)항)?")
+CITE_TOKEN = re.compile(
+    rf"(?:({_DOC_NAMES})\s*)?(제\d+조(?:의\d+)?)?\s*(?:제(\d+)항)?\s*(?:제(\d+)호)?"
+)
+HO_NO = re.compile(r"^\s*(\d+)(?:의\d+)?\.\s", re.M)   # 청크 본문에서 "6. ..." 같은 호 번호 추출용
 
 
-def parse_citations(answer: str) -> list[tuple[str | None, str, str | None]]:
-    """답변의 모든 '근거:' 줄을 읽어 [(법률명 또는 None, 조문번호, 항번호 또는 None), ...] 로 반환.
-    형식이 흔들려도(여러 줄, 제목 괄호, ①② 기호, 법률명 생략) 최대한 읽어낸다."""
+def parse_citations(answer: str) -> list[tuple[str | None, str, str | None, str | None]]:
+    """답변의 모든 '근거:' 줄을 읽어 [(법률명 또는 None, 조문번호, 항번호 또는 None, 호번호 또는 None), ...] 로 반환.
+    형식이 흔들려도(여러 줄, 제목 괄호, ①② 기호, 법률명·항 생략) 최대한 읽어낸다."""
     lines = [l.split(":", 1)[1] for l in answer.splitlines() if l.strip().startswith("근거:")]
     out = []
     for line in lines:
         line = re.sub(r"\([^)]*\)", "", line)                   # (손해배상의 청구) 같은 제목 제거
         for i, ch in enumerate(CIRCLED, 1):
             line = line.replace(ch, f" 제{i}항,")                  # ① → 제1항
-        last_doc, last_art = None, None
+        last_doc, last_art, last_para = None, None, None
         for token in re.split(r"[,·]|및", line):
             m = CITE_TOKEN.search(token.strip())
-            if not m or not (m.group(1) or m.group(2) or m.group(3)):
+            if not m or not (m.group(1) or m.group(2) or m.group(3) or m.group(4)):
                 continue
             doc = m.group(1) or last_doc                          # 법률명 생략 시 직전 것 재사용
             art = m.group(2) or last_art                          # "제2항"만 있으면 앞 조문에 붙임
             if not art:
                 continue
-            last_doc, last_art = doc, art
-            out.append((doc, art, m.group(3)))
+            para = m.group(3) or (last_para if not m.group(2) else None)  # "제8호"만 있으면 앞 항에 붙임
+            last_doc, last_art, last_para = doc, art, para
+            out.append((doc, art, para, m.group(4)))
     return out
 
 
 def cited_articles(answer: str, hits: list[dict]) -> list[str]:
     """인용된 법률·조문을 검색된 청크의 정확한 표시명으로 변환 (기억 저장용)"""
     titles = []
-    for doc, art, _ in parse_citations(answer):
+    for doc, art, _, _ in parse_citations(answer):
         for h in hits:
             m = h["meta"]
             if m["article_no"] == art and (doc is None or m["doc"] == doc):
@@ -189,16 +193,21 @@ class RagBot:
         return merged[:max(top_k, len(direct))]   # 직접 조회분은 잘리지 않게
 
     def verify_citations(self, answer: str, hits: list[dict]) -> list[str]:
-        """인용한 법률·조·항이 실제로 존재하는지 대조. hits는 "이 조문이 근거로 쓰였나"
-        (환각 방지)만 확인하는 데 쓰고, 항 번호가 몇 개까지 있는지는 top_k 검색 결과에
+        """인용한 법률·조·항·호가 실제로 존재하는지 대조. hits는 "이 조문이 근거로 쓰였나"
+        (환각 방지)만 확인하는 데 쓰고, 항·호 번호가 몇 개까지 있는지는 top_k 검색 결과에
         갇히지 않게 DB에서 해당 조문 전체를 직접 조회해 확인한다 — 조문이 여러 청크로
-        나뉘어 있을 때 그중 일부만 검색에 뽑혀서 생기는 오탐을 막는다."""
+        나뉘어 있을 때 그중 일부만 검색에 뽑혀서 생기는 오탐을 막는다.
+        호는 그 조문 전체 기준으로 존재 여부만 확인한다 (어느 항 소속인지까지는 안 따짐)."""
         hit_keys = {(h["meta"]["doc"], h["meta"]["article_no"]) for h in hits}
-        para_cache: dict[tuple[str, str], set] = {}
+        detail_cache: dict[tuple[str, str], tuple[set, set]] = {}   # key -> (항 번호 집합, 호 번호 집합)
 
         bad = []
-        for doc, art, para in parse_citations(answer):
-            label = f"{doc + ' ' if doc else ''}{art}" + (f" 제{para}항" if para else "")
+        for doc, art, para, ho in parse_citations(answer):
+            label = f"{doc + ' ' if doc else ''}{art}"
+            if para:
+                label += f" 제{para}항"
+            if ho:
+                label += f" 제{ho}호"
             candidates = [k for k in hit_keys if k[1] == art and (doc is None or k[0] == doc)]
             if doc is None and len(candidates) > 1:
                 bad.append(label + " (법률명 불명확)")
@@ -206,18 +215,20 @@ class RagBot:
             if not candidates:
                 bad.append(label)
                 continue
-            if not para:
+            if not para and not ho:
                 continue
 
             key = candidates[0]
-            if key not in para_cache:
+            if key not in detail_cache:
                 cond = {"$and": [{"doc": key[0]}, {"article_no": key[1]}]}
                 got = self.collection.get(where=cond, include=["documents"])
-                paras = set()
+                paras, hos = set(), set()
                 for text in got["documents"]:
                     paras.update(CIRCLED.index(ch) + 1 for ch in text if ch in CIRCLED)
-                para_cache[key] = paras
-            if int(para) not in para_cache[key]:
+                    hos.update(int(n) for n in HO_NO.findall(text))
+                detail_cache[key] = (paras, hos)
+            paras, hos = detail_cache[key]
+            if (para and int(para) not in paras) or (ho and int(ho) not in hos):
                 bad.append(label)
         return list(dict.fromkeys(bad))                               # 중복 제거, 순서 유지
 
