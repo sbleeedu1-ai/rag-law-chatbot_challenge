@@ -133,7 +133,7 @@ def verify_citations(answer: str, hits: list[dict]) -> list[str]:
         m = h["meta"]
         key = (m["doc"], m["article_no"])
         paras = {CIRCLED.index(ch) + 1 for ch in h["text"] if ch in CIRCLED}
-        have.setdefault(key, set()).update(paras or {None})       # 항 기호 없는 청크 = 조문 전체
+        have.setdefault(key, set()).update(paras)   # 항 기호 없는 청크는 추가 안 함 → 빈 집합 유지
 
     bad = []
     for doc, art, para in parse_citations(answer):
@@ -145,7 +145,9 @@ def verify_citations(answer: str, hits: list[dict]) -> list[str]:
         if not candidates:
             bad.append(label)
             continue
-        if para and int(para) not in have[candidates[0]] and None not in have[candidates[0]]:
+        # para(항 번호)를 인용했는데, 그 조문에서 실제로 확인된 항 번호 집합에 없으면 오류.
+        # 항 기호가 아예 없는 조문은 have[key]가 빈 집합이라, 항 번호를 인용하는 순간 바로 걸림.
+        if para and int(para) not in have[candidates[0]]:
             bad.append(label)
     return list(dict.fromkeys(bad))                               # 중복 제거, 순서 유지
 
