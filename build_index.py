@@ -83,18 +83,23 @@ def scan_heading(lines, chapter, section, subsec):
 
 
 def split_items(title: str, text: str, max_len: int = 500) -> list[str]:
-    """호(1. 2. 3.) 단위 분할. 짧은 호는 max_len까지 병합."""
+    """호(1. 2. 3.) 단위 분할. 짧은 호는 max_len까지 병합.
+    맨 앞(항 머리말, ①... 등 첫 호 이전 부분)을 모든 조각 앞에 반복해서 붙인다 —
+    안 그러면 뒤로 밀려 나뉜 조각은 자기가 몇 항 소속인지(①인지 ②인지) 텍스트만
+    봐서는 알 수 없게 된다."""
     parts = [p.strip() for p in HO.split(text) if p.strip()]
     if len(parts) <= 1:
         return [text]
 
-    out, buf = [], parts[0]
-    for p in parts[1:]:
-        if len(buf) + len(p) + 1 <= max_len:
-            buf = f"{buf}\n{p}"
+    head, items = parts[0], parts[1:]
+    out, buf = [], head
+    for p in items:
+        candidate = f"{buf}\n{p}"
+        if len(candidate) <= max_len:
+            buf = candidate
         else:
             out.append(buf)
-            buf = p
+            buf = f"{head}\n{p}"   # 새 조각도 항 머리말부터 다시 시작 (① 유지)
     out.append(buf)
     return [c if c.startswith(title) else f"{title}\n{c}" for c in out]
 
