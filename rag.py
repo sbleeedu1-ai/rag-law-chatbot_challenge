@@ -6,7 +6,7 @@ import os, re, time
 import chromadb
 from openai import OpenAI
 
-from common import DB_DIR, COLLECTION, load_embedder, embed_texts
+from common import DB_DIR, STRATEGIES, load_embedder, embed_texts
 
 LLM_MODEL = "gpt-4o-mini"
 
@@ -157,7 +157,11 @@ def cited_articles(answer: str, hits: list[dict]) -> list[str]:
 class RagBot:
     """무거운 자원(LLM 클라이언트, 임베딩 모델, DB)을 한 번 로딩해서 들고 있는 객체"""
 
-    def __init__(self):
+    def __init__(self, strategy: str = "article"):
+        if strategy not in STRATEGIES:
+            raise ValueError(f"알 수 없는 청킹 전략: {strategy} (선택지: {list(STRATEGIES)})")
+        self.strategy = strategy
+
         key = os.getenv("OPENAI_API_KEY")
         if not key:
             raise RuntimeError(".env 에서 OPENAI_API_KEY 를 못 읽었습니다")
@@ -166,7 +170,7 @@ class RagBot:
 
         client = chromadb.PersistentClient(path=DB_DIR)
         try:
-            self.collection = client.get_collection(COLLECTION)   # 열기만, 지우지 않음
+            self.collection = client.get_collection(STRATEGIES[strategy])   # 열기만, 지우지 않음
         except Exception as e:
             raise RuntimeError("컬렉션이 없습니다. 먼저 python build_index.py 를 실행하세요") from e
 
@@ -274,9 +278,10 @@ class RagBot:
 
 
 if __name__ == "__main__":
-    bot = RagBot()
+    s = input(f"청킹 전략 선택 {list(STRATEGIES)} (엔터=article) > ").strip() or "article"
+    bot = RagBot(strategy=s)
     memory = Memory()
-    print(f"준비 완료 ({bot.collection.count()}개 청크)")
+    print(f"[{bot.strategy}] 준비 완료 ({bot.collection.count()}개 청크)")
     while True:
         q = input("\n질문 (종료: q, 대화 초기화: r) > ").strip()
         if q.lower() == "q":

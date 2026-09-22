@@ -4,15 +4,16 @@
 """
 import streamlit as st
 from rag import RagBot, Memory
+from common import STRATEGIES, STRATEGY_LABELS
 
 st.set_page_config(page_title="저작권법 챗봇", page_icon="⚖️")
 
 
 # Streamlit 은 입력이 있을 때마다 이 파일을 처음부터 다시 실행한다.
-# cache_resource 로 무거운 RagBot 은 서버 전체에서 한 번만 만든다.
+# cache_resource 로 무거운 RagBot 은 전략별로 한 번씩만 만든다 (strategy 가 캐시 키).
 @st.cache_resource(show_spinner="임베딩 모델과 조문 DB를 불러오는 중...")
-def get_bot() -> RagBot:
-    return RagBot()
+def get_bot(strategy: str) -> RagBot:
+    return RagBot(strategy=strategy)
 
 
 def render_sources(hits: list[dict]):
@@ -30,17 +31,37 @@ def render_sources(hits: list[dict]):
 st.title("저작권법 질의응답")
 st.caption("저작권법 원문에서 관련 조항을 찾아, 그 조항만 근거로 답합니다. 이어서 질문해도 앞 대화를 기억합니다.")
 
+with st.sidebar:
+    st.subheader("청킹 전략")
+    strategy = st.radio(
+        "조항을 어떤 기준으로 잘라서 검색할지 선택",
+        options=list(STRATEGIES),
+        format_func=lambda s: STRATEGY_LABELS[s],
+        key="strategy",
+    )
+
 try:
-    bot = get_bot()
+    bot = get_bot(strategy)
 except Exception as e:
     st.error(f"챗봇을 준비하는 중 오류가 발생했습니다: {e}")
     st.stop()
+
+st.sidebar.caption(f"청크 {bot.collection.count()}개 (전략: {STRATEGY_LABELS[strategy]})")
 
 # 사용자(브라우저 탭)마다 따로 유지되는 것들
 if "messages" not in st.session_state:
     st.session_state.messages = []          # 화면에 그릴 대화
 if "memory" not in st.session_state:
     st.session_state.memory = Memory()      # LLM 에 넘길 기억
+if "last_strategy" not in st.session_state:
+    st.session_state.last_strategy = strategy
+
+# 전략을 바꾸면 이전 전략의 청크를 근거로 한 대화가 섞이므로 대화를 초기화
+if st.session_state.last_strategy != strategy:
+    st.session_state.messages = []
+    st.session_state.memory.clear()
+    st.session_state.last_strategy = strategy
+    st.sidebar.info("전략이 바뀌어 대화를 초기화했습니다.")
 
 with st.sidebar:
     st.subheader("검색 설정")

@@ -6,7 +6,7 @@ import numpy as np
 import pymupdf
 import chromadb
 
-from common import (PDF_PATH, CACHE_DIR, DB_DIR, COLLECTION, MODEL_NAME,
+from common import (PDF_PATH, CACHE_DIR, DB_DIR, STRATEGIES, MODEL_NAME,
                     load_embedder, embed_texts)
 
 
@@ -148,6 +148,55 @@ def chunk_by_article(text: str) -> list[dict]:
     return chunks
 
 
+# ── 3-2. 청킹 (비교용 대안 전략) ─────────────────────────
+def chunk_by_length(text: str, chunk_size: int = 400, overlap: int = 50) -> list[dict]:
+    """조·항 구조를 무시하고 글자수로 자르는 슬라이딩 윈도우 청킹.
+    chunk_by_article 과 달리 조문 경계와 상관없이 잘리므로, 청크가 문장 중간에서
+    끊기거나 여러 조문이 한 청크에 섞일 수 있다. (구조 기반 청킹과 비교용)
+    메타데이터(장/절/관/조문)는 그 청크가 시작하는 지점 기준으로 채운다."""
+    lines = text.splitlines()
+    chapter = chapter_note = section = section_note = subsec = subsec_note = ""
+    cur_article, cur_article_no = "", ""
+
+    chunks: list[dict] = []
+    buf: list[str] = []
+    buf_len = 0
+
+    def flush(carry_overlap: bool):
+        nonlocal buf, buf_len
+        chunk_text = "\n".join(buf).strip()
+        if chunk_text:
+            chunks.append({
+                "text": chunk_text, "article": cur_article, "article_no": cur_article_no,
+                "chapter": chapter, "chapter_note": chapter_note,
+                "section": section, "section_note": section_note,
+                "subsec": subsec, "subsec_note": subsec_note,
+            })
+        if carry_overlap and overlap > 0 and chunk_text:
+            tail = chunk_text[-overlap:]
+            buf, buf_len = [tail], len(tail)
+        else:
+            buf, buf_len = [], 0
+
+    for line in lines:
+        m = ARTICLE.match(line)
+        if m:
+            cur_article = m.group(1).strip()
+            cur_article_no = cur_article.split("(")[0]
+        if is_heading(line):
+            chapter, chapter_note, section, section_note, subsec, subsec_note = scan_heading(
+                [line], chapter, chapter_note, section, section_note, subsec, subsec_note)
+            continue   # 제목 줄 자체는 청크 본문에 넣지 않음 (구조 기반 청킹과 동일 처리)
+
+        buf.append(line)
+        buf_len += len(line) + 1
+        if buf_len >= chunk_size:
+            flush(carry_overlap=True)
+
+    flush(carry_overlap=False)
+    return chunks
+
+
 # ── 4. 임베딩 캐시 ───────────────────────────────────────
 def embed_cached(embedder, name: str, texts: list[str]) -> np.ndarray:
     """텍스트·모델이 같으면 저장된 임베딩 재사용"""
@@ -166,22 +215,32 @@ def embed_cached(embedder, name: str, texts: list[str]) -> np.ndarray:
 
 
 # ── 5. Chroma 저장 ───────────────────────────────────────
-def save_to_chroma(chunks: list[dict], texts: list[str], vecs: np.ndarray):
+def save_to_chroma(chunks: list[dict], texts: list[str], vecs: np.ndarray, collection: str):
     assert len(texts) == len(vecs) == len(chunks)
     client = chromadb.PersistentClient(path=DB_DIR)
     try:
-        client.delete_collection(COLLECTION)     # 있으면 지우고, 없으면 넘어감
+        client.delete_collection(collection)     # 있으면 지우고, 없으면 넘어감
     except Exception:
         pass
 
-    col = client.create_collection(COLLECTION, metadata={"hnsw:space": "cosine"})
+    col = client.create_collection(collection, metadata={"hnsw:space": "cosine"})
     col.add(
         ids=[f"chunk_{i}" for i in range(len(chunks))],
         documents=texts,
         embeddings=vecs.tolist(),
         metadatas=[{k: v for k, v in c.items() if k != "text"} for c in chunks],
     )
-    print("저장된 청크:", col.count())
+    print(f"[{collection}] 저장된 청크:", col.count())
+
+
+def build_strategy(strategy: str, chunk_fn, clean: str, embedder):
+    chunks = chunk_fn(clean)
+    texts = [c["text"] for c in chunks]
+    lens = [len(t) for t in texts]
+    print(f"[{strategy}] 청크 {len(chunks)}개 / 평균 {np.mean(lens):.0f}자 / 최대 {max(lens)}자")
+
+    vecs = embed_cached(embedder, f"records_{strategy}", texts)
+    save_to_chroma(chunks, texts, vecs, STRATEGIES[strategy])
 
 
 def main():
@@ -189,14 +248,9 @@ def main():
     clean = clean_text(raw)
     print(f"원문 {len(raw):,}자 → 정제 후 {len(clean):,}자")
 
-    chunks = chunk_by_article(clean)
-    texts = [c["text"] for c in chunks]
-    lens = [len(t) for t in texts]
-    print(f"청크 {len(chunks)}개 / 평균 {np.mean(lens):.0f}자 / 최대 {max(lens)}자")
-
     embedder = load_embedder()
-    vecs = embed_cached(embedder, "records", texts)
-    save_to_chroma(chunks, texts, vecs)
+    build_strategy("article", chunk_by_article, clean, embedder)
+    build_strategy("length", chunk_by_length, clean, embedder)
 
 
 if __name__ == "__main__":

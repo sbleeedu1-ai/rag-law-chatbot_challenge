@@ -10,7 +10,16 @@ BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
 PDF_PATH   = os.path.join(BASE_DIR, "law.pdf")
 CACHE_DIR  = os.path.join(BASE_DIR, "rag_rules_cache")
 DB_DIR     = os.path.join(BASE_DIR, "my_chroma_db")
-COLLECTION = "rules"
+
+# 청킹 전략별 컬렉션 이름 + 화면에 보여줄 이름
+STRATEGIES = {
+    "article": "rules_article",
+    "length":  "rules_length",
+}
+STRATEGY_LABELS = {
+    "article": "조·항 단위 (구조 기반)",
+    "length":  "글자수 단위 (슬라이딩 윈도우)",
+}
 
 MODEL_NAME  = "BAAI/bge-m3"
 MAX_SEQ_LEN = 1024
