@@ -126,32 +126,6 @@ def parse_citations(answer: str) -> list[tuple[str | None, str, str | None]]:
     return out
 
 
-def verify_citations(answer: str, hits: list[dict]) -> list[str]:
-    """인용한 법률·조·항이 검색된 청크에 실제로 있는지 대조. 없는(또는 문서가 불명확한) 인용 목록을 반환."""
-    have: dict[tuple[str, str], set] = {}
-    for h in hits:
-        m = h["meta"]
-        key = (m["doc"], m["article_no"])
-        paras = {CIRCLED.index(ch) + 1 for ch in h["text"] if ch in CIRCLED}
-        have.setdefault(key, set()).update(paras)   # 항 기호 없는 청크는 추가 안 함 → 빈 집합 유지
-
-    bad = []
-    for doc, art, para in parse_citations(answer):
-        label = f"{doc + ' ' if doc else ''}{art}" + (f" 제{para}항" if para else "")
-        candidates = [k for k in have if k[1] == art and (doc is None or k[0] == doc)]
-        if doc is None and len(candidates) > 1:
-            bad.append(label + " (법률명 불명확)")
-            continue
-        if not candidates:
-            bad.append(label)
-            continue
-        # para(항 번호)를 인용했는데, 그 조문에서 실제로 확인된 항 번호 집합에 없으면 오류.
-        # 항 기호가 아예 없는 조문은 have[key]가 빈 집합이라, 항 번호를 인용하는 순간 바로 걸림.
-        if para and int(para) not in have[candidates[0]]:
-            bad.append(label)
-    return list(dict.fromkeys(bad))                               # 중복 제거, 순서 유지
-
-
 def cited_articles(answer: str, hits: list[dict]) -> list[str]:
     """인용된 법률·조문을 검색된 청크의 정확한 표시명으로 변환 (기억 저장용)"""
     titles = []
@@ -213,6 +187,39 @@ class RagBot:
         seen = {h["id"] for h in direct}
         merged = direct + [h for h in vector if h["id"] not in seen]
         return merged[:max(top_k, len(direct))]   # 직접 조회분은 잘리지 않게
+
+    def verify_citations(self, answer: str, hits: list[dict]) -> list[str]:
+        """인용한 법률·조·항이 실제로 존재하는지 대조. hits는 "이 조문이 근거로 쓰였나"
+        (환각 방지)만 확인하는 데 쓰고, 항 번호가 몇 개까지 있는지는 top_k 검색 결과에
+        갇히지 않게 DB에서 해당 조문 전체를 직접 조회해 확인한다 — 조문이 여러 청크로
+        나뉘어 있을 때 그중 일부만 검색에 뽑혀서 생기는 오탐을 막는다."""
+        hit_keys = {(h["meta"]["doc"], h["meta"]["article_no"]) for h in hits}
+        para_cache: dict[tuple[str, str], set] = {}
+
+        bad = []
+        for doc, art, para in parse_citations(answer):
+            label = f"{doc + ' ' if doc else ''}{art}" + (f" 제{para}항" if para else "")
+            candidates = [k for k in hit_keys if k[1] == art and (doc is None or k[0] == doc)]
+            if doc is None and len(candidates) > 1:
+                bad.append(label + " (법률명 불명확)")
+                continue
+            if not candidates:
+                bad.append(label)
+                continue
+            if not para:
+                continue
+
+            key = candidates[0]
+            if key not in para_cache:
+                cond = {"$and": [{"doc": key[0]}, {"article_no": key[1]}]}
+                got = self.collection.get(where=cond, include=["documents"])
+                paras = set()
+                for text in got["documents"]:
+                    paras.update(CIRCLED.index(ch) + 1 for ch in text if ch in CIRCLED)
+                para_cache[key] = paras
+            if int(para) not in para_cache[key]:
+                bad.append(label)
+        return list(dict.fromkeys(bad))                               # 중복 제거, 순서 유지
 
     @staticmethod
     def build_context(hits: list[dict]) -> str:
@@ -276,7 +283,7 @@ class RagBot:
         )
         answer = res.choices[0].message.content
         cited = cited_articles(answer, hits)
-        unverified = verify_citations(answer, hits)
+        unverified = self.verify_citations(answer, hits)
         if show_context:
             print(f"[생성 {time.time() - t:.1f}초] 인용: {', '.join(cited) or '없음'}")
             if unverified:
